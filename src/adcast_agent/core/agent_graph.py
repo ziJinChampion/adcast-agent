@@ -18,7 +18,7 @@ LangGraph AI Agent 决策图 - Observe-Analyze-Act 闭环
                                                                  OBSERVE
 
 状态持久化：通过 CheckpointManager 在每个节点后自动保存
-长期记忆：通过 LongTermMemory 在 reflect 节点写入经验
+长期记忆：通过 VectorLongTermMemory 在 observe/analyze/decide/reflect 节点 RAG 增强
 """
 
 import json
@@ -76,7 +76,7 @@ class AgentState(dict):
     # 平台数据（OBSERVE阶段填充）
     platform_data: List[Dict[str, Any]]      # 各平台能力/预测数据
     platform_reports: Dict[str, List]        # 各平台报表数据
-    historical_data: Dict[str, Any]          # 历史表现数据
+    historical_data: Dict[str, Any]          # 历史表现数据（含RAG上下文）
 
     # LLM分析结果（ANALYZE阶段填充）
     llm_analysis: Optional[Dict[str, Any]]   # LLM分析结果
@@ -126,20 +126,20 @@ class AgentState(dict):
 
 async def node_observe(state: AgentState) -> AgentState:
     """
-    OBSERVE 节点 - 收集所有相关数据
+    OBSERVE 节点 - 收集所有相关数据（已集成向量长期记忆RAG）
     
     1. 收集各平台能力数据
-    2. 获取平台预测数据
-    3. 拉取历史表现数据
-    4. 从长期记忆获取相关经验
+    2. 通过向量记忆语义搜索相似Campaign历史
+    3. 通过RAG查询获取格式化的历史投放经验
+    4. 整合所有数据到 historical_data
     """
     logger.info(f"[OBSERVE] Iteration {state['iteration']} - Collecting data...")
 
     new_state = AgentState(**state)
     new_state["iteration"] = state.get("iteration", 0) + 1
 
-    # 构建Campaign请求摘要
-    campaign_summary = {
+    # 构建Campaign请求摘要（用于向量搜索）
+    campaign_request = {
         "name": state.get("campaign_name", ""),
         "objective": state.get("campaign_objective", ""),
         "budget": state.get("campaign_budget", 0),
@@ -150,33 +150,53 @@ async def node_observe(state: AgentState) -> AgentState:
         "audience": state.get("campaign_audience"),
     }
 
-    # 模拟平台数据收集（实际应与platform_manager集成）
-    platform_data = new_state.get("platform_data", [])
-    if not platform_data:
-        # 从长期记忆获取历史经验
-        memory = get_long_term_memory()
-        objective = state.get("campaign_objective", "")
-        industry = state.get("campaign_industry", "")
+    # === 向量记忆查询（深度集成）===
+    memory = get_long_term_memory()
+    similar_campaigns = []
+    rag_context = ""
 
-        historical_exp = []
-        try:
-            search_results = await memory.search(
-                f"platform experience {objective} {industry}",
-                tags=["platform_experience"],
+    # 1. 语义搜索相似 Campaign 历史
+    try:
+        if hasattr(memory, "find_similar_campaigns"):
+            similar_campaigns = await memory.find_similar_campaigns(campaign_request, limit=3)
+            logger.info(f"[OBSERVE] Found {len(similar_campaigns)} similar campaigns from memory")
+    except Exception as e:
+        logger.warning(f"[OBSERVE] find_similar_campaigns failed: {e}")
+
+    # 2. RAG 查询历史投放经验
+    try:
+        if hasattr(memory, "rag_query"):
+            objective = state.get("campaign_objective", "")
+            industry = state.get("campaign_industry", "")
+            rag_query_text = f"{objective} campaign experience {industry}".strip()
+            rag_context = await memory.rag_query(
+                query=rag_query_text,
+                context_type="campaign_experience",
                 limit=5,
             )
-            historical_exp = [r.get("data", {}) for r in search_results]
-        except Exception as e:
-            logger.warning(f"Long-term memory search failed: {e}")
+            if rag_context:
+                logger.info(f"[OBSERVE] RAG context: {len(rag_context)} chars")
+    except Exception as e:
+        logger.warning(f"[OBSERVE] RAG query failed: {e}")
 
-        new_state["historical_data"] = {
-            "past_experiences": historical_exp,
-            "industry": industry,
-            "objective": objective,
-        }
+    # 3. 获取默认平台数据（如果没有实际平台数据）
+    platform_data = new_state.get("platform_data", [])
+    if not platform_data:
+        platform_data = _get_default_platform_data(state.get("campaign_target_market", "global"))
+    new_state["platform_data"] = platform_data
 
-    logger.info(f"[OBSERVE] Collected data for {len(platform_data)} platforms, "
-                f"{len(new_state.get('historical_data', {}).get('past_experiences', []))} historical records")
+    # 4. 整合所有数据到 historical_data
+    new_state["historical_data"] = {
+        "past_experiences": similar_campaigns,
+        "rag_context": rag_context,
+        "campaign_request": campaign_request,
+        "industry": campaign_request.get("industry", ""),
+        "objective": campaign_request.get("objective", ""),
+    }
+
+    logger.info(f"[OBSERVE] {len(platform_data)} platforms, "
+                f"{len(similar_campaigns)} similar campaigns, "
+                f"RAG {len(rag_context)} chars")
 
     new_state["next_action"] = "analyze"
     return new_state
@@ -184,13 +204,13 @@ async def node_observe(state: AgentState) -> AgentState:
 
 async def node_analyze(state: AgentState) -> AgentState:
     """
-    ANALYZE 节点 - LLM分析数据
+    ANALYZE 节点 - LLM分析数据（已集成RAG历史经验增强）
     
-    1. 将收集的数据发送给LLM
-    2. 获取LLM的平台分析和评分
-    3. 结合历史经验给出洞察
+    1. 从 historical_data 提取 RAG 上下文和相似 Campaign
+    2. 将历史经验拼接到 campaign_request 的 _memory_context 字段
+    3. 调用 LLM 进行平台选择分析（增强版prompt）
     """
-    logger.info(f"[ANALYZE] Analyzing with LLM...")
+    logger.info(f"[ANALYZE] Analyzing with LLM (RAG-enhanced)...")
 
     new_state = AgentState(**state)
 
@@ -212,11 +232,39 @@ async def node_analyze(state: AgentState) -> AgentState:
 
     platform_data = state.get("platform_data", [])
     if not platform_data:
-        # 如果还没有平台数据，提供一个默认列表
         platform_data = _get_default_platform_data(state.get("campaign_target_market", "global"))
 
+    # === 构建增强的 LLM prompt（RAG 上下文注入）===
+    historical_data = state.get("historical_data", {})
+    rag_context = historical_data.get("rag_context", "")
+    similar_campaigns = historical_data.get("past_experiences", [])
+
+    memory_context_parts = []
+    
+    if rag_context:
+        memory_context_parts.append(f"=== 历史投放经验（来自长期记忆）===\n{rag_context}")
+    
+    if similar_campaigns:
+        camp_lines = ["\n=== 相似 Campaign 历史 ==="]
+        for i, camp in enumerate(similar_campaigns[:3], 1):
+            data = camp.get("data", {})
+            camp_lines.append(
+                f"\n[{i}] 平台: {data.get('platform', 'N/A')}, "
+                f"目标: {data.get('objective', 'N/A')}, "
+                f"行业: {data.get('industry', 'N/A')}\n"
+                f"    ROAS: {data.get('roas', 'N/A')}, "
+                f"CPA: {data.get('cpa', 'N/A')}, "
+                f"花费: {data.get('spend', 'N/A')}\n"
+                f"    备注: {str(data.get('notes', ''))[:200]}"
+            )
+        memory_context_parts.append("\n".join(camp_lines))
+
+    # 将 memory_context 注入到 campaign_request 的 _memory_context 字段
+    # llm.decide_platform 方法会读取这个字段并拼接到 prompt
+    campaign_request["_memory_context"] = "\n\n".join(memory_context_parts)
+
     try:
-        # 调用LLM进行决策分析
+        # 调用LLM进行决策分析（prompt 中已包含历史经验）
         llm_result = await llm.decide_platform(campaign_request, platform_data)
 
         new_state["llm_analysis"] = llm_result
@@ -245,11 +293,11 @@ async def node_analyze(state: AgentState) -> AgentState:
 
 async def node_decide(state: AgentState) -> AgentState:
     """
-    DECIDE 节点 - 做出最终决策
+    DECIDE 节点 - 做出最终决策（已集成历史预算查询）
     
     1. 综合LLM分析和规则引擎的结果
-    2. 确定预算分配
-    3. 生成执行计划
+    2. 查询历史预算分配作为参考
+    3. 确定预算分配
     4. 检查是否需要人工审批
     """
     logger.info(f"[DECIDE] Making final decision...")
@@ -260,7 +308,33 @@ async def node_decide(state: AgentState) -> AgentState:
     llm_analysis = new_state.get("llm_analysis", {})
     total_budget = new_state.get("campaign_daily_budget", 100)
 
-    # 从LLM分析中提取预算分配
+    # === 查询历史预算分配作为参考 ===
+    memory = get_long_term_memory()
+    historical_budgets: Dict[str, float] = {}
+    
+    try:
+        if hasattr(memory, "search") and selected_platforms:
+            objective = state.get("campaign_objective", "")
+            for platform in selected_platforms:
+                budget_results = await memory.search(
+                    query=f"{platform} budget allocation {objective}",
+                    tags=["campaign_experience"],
+                    limit=2,
+                )
+                if budget_results:
+                    allocations = [
+                        r.get("data", {}).get("budget_allocation", {}).get(platform, 0)
+                        for r in budget_results
+                        if r.get("data", {}).get("budget_allocation", {}).get(platform)
+                    ]
+                    if allocations:
+                        avg_budget = sum(allocations) / len(allocations)
+                        if avg_budget > 0:
+                            historical_budgets[platform] = avg_budget
+    except Exception as e:
+        logger.warning(f"[DECIDE] Historical budget search failed: {e}")
+
+    # 预算分配：优先使用LLM推荐，其次参考历史数据，最后均分
     budget_allocation = {}
     platforms_data = llm_analysis.get("platforms", [])
 
@@ -272,7 +346,15 @@ async def node_decide(state: AgentState) -> AgentState:
             if name and pct > 0:
                 budget_allocation[name] = total_budget * (pct / 100)
 
-    # 如果没有LLM分配，均分
+    # 如果LLM没有分配，参考历史数据
+    if not budget_allocation and historical_budgets:
+        total_hist = sum(historical_budgets.values())
+        if total_hist > 0:
+            for platform in selected_platforms:
+                hist = historical_budgets.get(platform, 0)
+                budget_allocation[platform] = total_budget * (hist / total_hist)
+
+    # Fallback: 均分
     if not budget_allocation and selected_platforms:
         per_platform = total_budget / len(selected_platforms)
         for p in selected_platforms:
@@ -343,11 +425,11 @@ async def node_execute(state: AgentState) -> AgentState:
 
 async def node_reflect(state: AgentState) -> AgentState:
     """
-    REFLECT 节点 - 反思和学习
+    REFLECT 节点 - 反思和学习（已集成向量embedding保存）
     
     1. 评估执行结果
     2. 提取学习要点
-    3. 写入长期记忆
+    3. 使用向量embedding保存Campaign经验到长期记忆
     4. 决定是否继续循环
     """
     logger.info(f"[REFLECT] Reflecting on results...")
@@ -389,22 +471,53 @@ async def node_reflect(state: AgentState) -> AgentState:
         except Exception as e:
             logger.warning(f"[REFLECT] Performance analysis failed: {e}")
 
-    # 保存到长期记忆
+    # === 使用向量embedding保存Campaign经验（深度集成）===
     memory = get_long_term_memory()
+    
     try:
-        await memory.save(
-            key=f"campaign_iter:{state.get('thread_id', '')}:{iteration}",
-            data={
-                "campaign_name": state.get("campaign_name", ""),
-                "iteration": iteration,
-                "platforms": state.get("selected_platforms", []),
-                "budget_allocation": state.get("budget_allocation", {}),
-                "learning_notes": learning_notes,
-            },
-            tags=["campaign_iteration", state.get("campaign_objective", ""), state.get("campaign_industry", "")],
-        )
+        if hasattr(memory, "save_campaign_experience"):
+            # 为每个选中的平台保存经验
+            for platform in state.get("selected_platforms", []):
+                exec_result = state.get("execution_results", {}).get(platform, {})
+                platform_scores = state.get("platform_scores", [])
+                platform_score = next(
+                    (p for p in platform_scores if p.get("name") == platform), {}
+                )
+
+                await memory.save_campaign_experience({
+                    "campaign_name": state.get("campaign_name", ""),
+                    "campaign_id": state.get("thread_id", ""),
+                    "platform": platform,
+                    "objective": state.get("campaign_objective", ""),
+                    "industry": state.get("campaign_industry", ""),
+                    "target_market": state.get("campaign_target_market", ""),
+                    "budget": state.get("budget_allocation", {}).get(platform, 0),
+                    "roas": platform_score.get("score", 0) / 25 if platform_score.get("score") else 0,
+                    "score": platform_score.get("score", 0),
+                    "confidence": platform_score.get("confidence", "medium"),
+                    "iteration": iteration,
+                    "notes": f"Platform {platform} selected in iteration {iteration}. "
+                             f"Learning: {'; '.join(learning_notes[-3:])}",
+                })
+                logger.info(f"[REFLECT] Campaign experience saved for {platform}")
+
+        # 同时保存一个聚合的迭代记录
+        if hasattr(memory, "save"):
+            await memory.save(
+                key=f"campaign_iter:{state.get('thread_id', '')}:{iteration}",
+                data={
+                    "campaign_name": state.get("campaign_name", ""),
+                    "iteration": iteration,
+                    "platforms": state.get("selected_platforms", []),
+                    "budget_allocation": state.get("budget_allocation", {}),
+                    "learning_notes": learning_notes,
+                    "decision": state.get("decision", {}),
+                },
+                tags=["campaign_iteration", state.get("campaign_objective", ""),
+                      state.get("campaign_industry", "")],
+            )
     except Exception as e:
-        logger.warning(f"[REFLECT] Failed to save to long-term memory: {e}")
+        logger.warning(f"[REFLECT] Failed to save vector memory: {e}")
 
     new_state["learning_notes"] = learning_notes
 
@@ -581,16 +694,25 @@ def _get_default_platform_data(target_market: str) -> List[Dict[str, Any]]:
         {
             "name": "baidu_ads",
             "display_name": "百度营销",
-            "strengths": ["search", "intent_based", "B2B"],
+            "strengths": ["search", "B2B"],
             "avg_cpm": 5,
             "avg_cpc": 4,
             "best_for": ["leads", "traffic", "B2B"],
             "min_budget": 50,
         },
+        {
+            "name": "adform",
+            "display_name": "Adform FLOW",
+            "strengths": ["display", "programmatic"],
+            "avg_cpm": 7.5,
+            "avg_cpc": 1.8,
+            "best_for": ["awareness", "conversions", "traffic"],
+            "min_budget": 1000,
+        },
     ]
 
     # 根据目标市场过滤
-    overseas = ["google_ads", "meta_ads", "amazon_dsp"]
+    overseas = ["google_ads", "meta_ads", "amazon_dsp", "adform"]
     domestic = ["oceanengine", "tencent_ads", "kuaishou", "baidu_ads"]
 
     if target_market == "domestic":

@@ -2,15 +2,16 @@
 AdCast Agent - 主入口 (AI Loop 版本)
 
 LangGraph AI Loop 驱动的工作流：
-1. OBSERVE  - 收集平台数据 + 历史表现
-2. ANALYZE  - LLM 智能分析各平台适合度
-3. DECIDE   - AI 决策选平台 + 预算分配
+1. OBSERVE  - 收集平台数据 + 历史表现（+ 向量记忆RAG查询）
+2. ANALYZE  - LLM 智能分析各平台适合度（+ RAG历史经验增强prompt）
+3. DECIDE   - AI 决策选平台 + 预算分配（+ 历史预算参考）
 4. EXECUTE  - 创建 Campaign（默认 PAUSED）
-5. REFLECT  - 监控表现 + 学习优化
+5. REFLECT  - 监控表现 + 学习优化（+ 向量embedding保存经验）
 
 [Loop] <- 定时循环回到 OBSERVE
 
 Checkpoint 持久化确保进程重启后可恢复。
+长期记忆（向量数据库）实现跨 Campaign 经验复用。
 
 使用方式：
   python -m adcast_agent run      # 启动 AI Loop（CLI 模式）
@@ -21,24 +22,24 @@ Checkpoint 持久化确保进程重启后可恢复。
   python -m adcast_agent oneshot  # 单次投放
 """
 
-import asyncio
 import argparse
+import asyncio
 import json
 import sys
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from .core.agent_graph import AgentState
+from .core.budget_allocator import AllocationStrategy
+from .core.campaign_loop import CampaignLoop, LoopScheduler
+from .core.checkpoint import CheckpointManager
+from .core.decision_engine import CampaignRequest, StrategyType
+from .core.llm_client import LLMClient
+from .mcp.registry import MCPRegistry
+from .platform_manager import PlatformManager
+from .platforms.base import PlatformAudience
 from .utils.config import get_config
 from .utils.logger import setup_logger
-from .platforms.base import PlatformAudience
-from .core.decision_engine import CampaignRequest, StrategyType
-from .core.budget_allocator import AllocationStrategy
-from .core.checkpoint import CheckpointManager
-from .core.llm_client import LLMClient
-from .core.agent_graph import AgentState
-from .core.campaign_loop import CampaignLoop, LoopScheduler
-from .platform_manager import PlatformManager
-from .mcp.registry import MCPRegistry
 
 logger = setup_logger("adcast")
 
@@ -49,7 +50,7 @@ class AdCastAgent:
 
     两种工作模式：
     1. One-shot 模式: 单次 Campaign 投放
-    2. AI Loop 模式: LangGraph 驱动的持续优化 Loop
+    2. AI Loop 模式: LangGraph 驱动的持续优化 Loop（集成向量长期记忆RAG）
     """
 
     def __init__(self):
@@ -62,9 +63,10 @@ class AdCastAgent:
         self.llm_client = None
         self.loop_scheduler = None
         self.campaign_manager = None
+        self.memory = None  # 长期记忆实例
 
     async def initialize(self):
-        """初始化 Agent - 连接所有平台 + 初始化 AI Loop 组件"""
+        """初始化 Agent - 连接所有平台 + 初始化 AI Loop 组件 + 向量长期记忆"""
         self.logger.info("=" * 60)
         self.logger.info("AdCast Agent 初始化中... [AI Loop Mode]")
         self.logger.info("=" * 60)
@@ -100,6 +102,18 @@ class AdCastAgent:
             decision_engine=decision_engine,
         )
 
+        # === 4.5. 初始化长期记忆（向量数据库）===
+        try:
+            from .core.memory_factory import init_memory
+
+            memory_config = self.config.get_memory_config()
+            self.memory = init_memory(memory_config)
+            self.logger.info(f"长期记忆初始化完成: backend={memory_config.get('backend', 'placeholder')}")
+        except Exception as e:
+            self.logger.warning(f"向量记忆初始化失败，使用 placeholder: {e}")
+            from .core.long_term_memory import PlaceholderLongTermMemory
+            self.memory = PlaceholderLongTermMemory()
+
         # 5. 初始化 Loop 调度器
         self.loop_scheduler = LoopScheduler(self.checkpoint_manager)
 
@@ -123,7 +137,7 @@ class AdCastAgent:
         max_iterations: int = 10,
         continuous: bool = False,
     ) -> Dict[str, Any]:
-        """运行 AI Loop 模式"""
+        """运行 AI Loop 模式（已集成向量长期记忆RAG）"""
         self.logger.info(f"\n{'='*60}")
         self.logger.info(f"[AI Loop] 启动: {name}")
         self.logger.info(f"{'='*60}")
@@ -300,7 +314,7 @@ class AdCastAgent:
     def _get_default_platform_data(self, target_market: str) -> list:
         """默认平台数据"""
         all_platforms = [
-            {"name": "google_ads", "display_name": "Google Ads", "strengths": ["search", "shopping"], "avg_cpm": 8.5, "avg_cpc": 2.5, "best_for": ["conversions", "sales", "traffic"], "min_budget": 1},
+            {"name": "google_ads", "display_name": "Google Ads", "strengths": ["search", "shopping"], "avg_cpm": 8.5, "avg_cpc": 2.5, "best_for": ["conversions", "sales", "traffic", "leads"], "min_budget": 1},
             {"name": "meta_ads", "display_name": "Meta Ads", "strengths": ["social", "visual"], "avg_cpm": 12, "avg_cpc": 1.5, "best_for": ["awareness", "sales"], "min_budget": 1},
             {"name": "oceanengine", "display_name": "巨量引擎", "strengths": ["short_video", "livestream"], "avg_cpm": 15, "avg_cpc": 3, "best_for": ["awareness", "sales", "app_installs"], "min_budget": 300},
             {"name": "tencent_ads", "display_name": "腾讯广告", "strengths": ["social", "mini_program"], "avg_cpm": 18, "avg_cpc": 2.8, "best_for": ["conversions", "gaming"], "min_budget": 50},
@@ -322,8 +336,7 @@ class AdCastAgent:
 
 def main():
     """命令行入口"""
-    parser = argparse.ArgumentParser(
-        description="AdCast Agent - AI 自动广告投放 (LangGraph Loop)",
+    parser = argparse.ArgumentParser(description="AdCast Agent - AI 自动广告投放 (LangGraph Loop)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
