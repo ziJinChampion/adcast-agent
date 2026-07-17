@@ -1,27 +1,35 @@
 # AdCast Agent 依赖
 
-# 核心依赖
+# ==================== 核心依赖 ====================
 pyyaml>=6.0
 python-dotenv>=1.0.0
 
-# MCP协议
-# MCP SDK ( Anthropic官方 )
-# 注: MCP SDK可通过pip安装: pip install mcp
-# 或直接使用本项目内置的MCP客户端
+# ==================== LangGraph AI Loop ====================
+langgraph>=0.2.0
+langchain-core>=0.3.0
 
-# HTTP请求
+# LLM (OpenAI兼容接口)
+openai>=1.30.0
+langchain-openai>=0.2.0
+
+# ==================== HTTP请求 ====================
 aiohttp>=3.9.0
 aiofiles>=23.0.0
 
-# 数据处理
+# ==================== Checkpoint PostgreSQL (可选) ====================
+# 仅在 checkpoint.backend=postgres 时需要
+# asyncpg>=0.29.0
+
+# ==================== 数据处理 ====================
 pandas>=2.0.0
 numpy>=1.24.0
 
-# 可选: 增强功能
+# ==================== 可选: 增强功能 ====================
 # rich>=13.0.0          # 终端美化输出
 # typer>=0.9.0          # CLI框架
+# psycopg2-binary>=2.9  # PostgreSQL同步驱动（备用）
 
-# 开发依赖
+# ==================== 开发依赖 ====================
 # pytest>=7.0.0
 # pytest-asyncio>=0.21.0
 # black>=23.0.0
