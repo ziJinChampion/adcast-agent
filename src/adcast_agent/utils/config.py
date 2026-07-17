@@ -14,12 +14,12 @@ class PlatformConfig:
     """单个平台的配置"""
     name: str
     enabled: bool = True
-    mcp_server: Optional[str] = None  # MCP Server标识
+    mcp_server: Optional[str] = None
     api_base_url: Optional[str] = None
-    auth_type: str = "oauth2"  # oauth2 / api_key / token
+    auth_type: str = "oauth2"
     credentials: Dict[str, str] = field(default_factory=dict)
-    budget_limit_daily: float = 0.0  # 每日预算上限 (0表示无限制)
-    require_approval: bool = True  # 写入操作是否需要人工确认
+    budget_limit_daily: float = 0.0
+    require_approval: bool = True
     readonly: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -27,14 +27,47 @@ class PlatformConfig:
 @dataclass
 class SecurityConfig:
     """安全控制配置"""
-    global_budget_limit_daily: float = 10000.0  # 全局每日预算上限
+    global_budget_limit_daily: float = 10000.0
     require_approval_for_create: bool = True
     require_approval_for_update: bool = True
     require_approval_for_delete: bool = True
-    auto_pause_on_overspend: bool = True  # 超支自动暂停
-    overspend_threshold: float = 1.1  # 超支阈值 (110%)
+    auto_pause_on_overspend: bool = True
+    overspend_threshold: float = 1.1
     max_retry_attempts: int = 3
     request_timeout: int = 30
+
+
+@dataclass
+class LLMConfig:
+    """LLM配置"""
+    provider: str = "openai"
+    model: str = "gpt-4o"
+    api_key: str = ""
+    base_url: Optional[str] = None
+    temperature: float = 0.3
+    max_tokens: int = 4096
+
+
+@dataclass
+class CheckpointConfig:
+    """Checkpoint配置"""
+    backend: str = "memory"
+    postgres: Dict[str, Any] = field(default_factory=lambda: {
+        "host": "localhost",
+        "port": 5432,
+        "database": "adcast",
+        "user": "adcast",
+        "password": "",
+        "table_name": "checkpoints",
+    })
+
+
+@dataclass
+class LoopConfig:
+    """Loop配置"""
+    interval_minutes: int = 60
+    max_iterations: int = 10
+    auto_resume_after_pause: bool = False
 
 
 @dataclass
@@ -42,6 +75,9 @@ class AgentConfig:
     """Agent全局配置"""
     name: str = "adcast-agent"
     log_level: str = "INFO"
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
+    loop: LoopConfig = field(default_factory=LoopConfig)
     platforms: Dict[str, PlatformConfig] = field(default_factory=dict)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     decision_engine: Dict[str, Any] = field(default_factory=dict)
@@ -65,7 +101,7 @@ class ConfigManager:
     def _load_config(self) -> AgentConfig:
         """加载配置文件"""
         config_path = self._find_config_file()
-        
+
         if config_path and config_path.exists():
             with open(config_path, 'r', encoding='utf-8') as f:
                 raw_config = yaml.safe_load(f)
@@ -74,7 +110,7 @@ class ConfigManager:
 
         # 环境变量覆盖
         raw_config = self._apply_env_overrides(raw_config)
-        
+
         return self._parse_config(raw_config)
 
     def _find_config_file(self) -> Optional[Path]:
@@ -95,6 +131,30 @@ class ConfigManager:
         return {
             "name": "adcast-agent",
             "log_level": "INFO",
+            "llm": {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "",
+                "base_url": None,
+                "temperature": 0.3,
+                "max_tokens": 4096,
+            },
+            "checkpoint": {
+                "backend": "memory",
+                "postgres": {
+                    "host": "localhost",
+                    "port": 5432,
+                    "database": "adcast",
+                    "user": "adcast",
+                    "password": "",
+                    "table_name": "checkpoints",
+                },
+            },
+            "loop": {
+                "interval_minutes": 60,
+                "max_iterations": 10,
+                "auto_resume_after_pause": False,
+            },
             "platforms": {},
             "security": {
                 "global_budget_limit_daily": 10000.0,
@@ -118,7 +178,23 @@ class ConfigManager:
         if budget := os.getenv("ADCAST_GLOBAL_BUDGET_LIMIT"):
             config.setdefault("security", {})["global_budget_limit_daily"] = float(budget)
 
-        # 各平台凭证（格式: ADCAST_<PLATFORM>_<KEY>）
+        # LLM API Key
+        if llm_key := os.getenv("ADCAST_LLM_API_KEY"):
+            config.setdefault("llm", {})["api_key"] = llm_key
+
+        # LLM Base URL
+        if llm_url := os.getenv("ADCAST_LLM_BASE_URL"):
+            config.setdefault("llm", {})["base_url"] = llm_url
+
+        # Checkpoint PostgreSQL 密码
+        if pg_password := os.getenv("ADCAST_PG_PASSWORD"):
+            config.setdefault("checkpoint", {}).setdefault("postgres", {})["password"] = pg_password
+
+        # Checkpoint 后端切换
+        if cp_backend := os.getenv("ADCAST_CHECKPOINT_BACKEND"):
+            config.setdefault("checkpoint", {})["backend"] = cp_backend
+
+        # 各平台凭证
         for key, value in os.environ.items():
             if key.startswith("ADCAST_") and key.count("_") >= 2:
                 parts = key.split("_")
@@ -131,6 +207,40 @@ class ConfigManager:
 
     def _parse_config(self, raw: Dict[str, Any]) -> AgentConfig:
         """解析原始配置为结构化配置"""
+        # 解析LLM配置
+        llm_raw = raw.get("llm", {})
+        llm_config = LLMConfig(
+            provider=llm_raw.get("provider", "openai"),
+            model=llm_raw.get("model", "gpt-4o"),
+            api_key=llm_raw.get("api_key", ""),
+            base_url=llm_raw.get("base_url"),
+            temperature=llm_raw.get("temperature", 0.3),
+            max_tokens=llm_raw.get("max_tokens", 4096),
+        )
+
+        # 解析Checkpoint配置
+        cp_raw = raw.get("checkpoint", {})
+        checkpoint_config = CheckpointConfig(
+            backend=cp_raw.get("backend", "memory"),
+            postgres=cp_raw.get("postgres", {
+                "host": "localhost",
+                "port": 5432,
+                "database": "adcast",
+                "user": "adcast",
+                "password": "",
+                "table_name": "checkpoints",
+            }),
+        )
+
+        # 解析Loop配置
+        loop_raw = raw.get("loop", {})
+        loop_config = LoopConfig(
+            interval_minutes=loop_raw.get("interval_minutes", 60),
+            max_iterations=loop_raw.get("max_iterations", 10),
+            auto_resume_after_pause=loop_raw.get("auto_resume_after_pause", False),
+        )
+
+        # 解析平台配置
         platforms = {}
         for name, pconf in raw.get("platforms", {}).items():
             platforms[name] = PlatformConfig(name=name, **pconf)
@@ -140,6 +250,9 @@ class ConfigManager:
         return AgentConfig(
             name=raw.get("name", "adcast-agent"),
             log_level=raw.get("log_level", "INFO"),
+            llm=llm_config,
+            checkpoint=checkpoint_config,
+            loop=loop_config,
             platforms=platforms,
             security=security,
             decision_engine=raw.get("decision_engine", {}),
@@ -158,6 +271,32 @@ class ConfigManager:
         return {
             name: pc for name, pc in self._config.platforms.items()
             if pc.enabled
+        }
+
+    def get_llm_config(self) -> Dict[str, Any]:
+        """获取LLM配置为字典"""
+        return {
+            "provider": self._config.llm.provider,
+            "model": self._config.llm.model,
+            "api_key": self._config.llm.api_key,
+            "base_url": self._config.llm.base_url,
+            "temperature": self._config.llm.temperature,
+            "max_tokens": self._config.llm.max_tokens,
+        }
+
+    def get_checkpoint_config(self) -> Dict[str, Any]:
+        """获取Checkpoint配置为字典"""
+        return {
+            "backend": self._config.checkpoint.backend,
+            "postgres": self._config.checkpoint.postgres,
+        }
+
+    def get_loop_config(self) -> Dict[str, Any]:
+        """获取Loop配置为字典"""
+        return {
+            "interval_minutes": self._config.loop.interval_minutes,
+            "max_iterations": self._config.loop.max_iterations,
+            "auto_resume_after_pause": self._config.loop.auto_resume_after_pause,
         }
 
 

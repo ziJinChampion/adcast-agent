@@ -4,7 +4,40 @@
 name: adcast-agent
 log_level: INFO
 
-# 安全设置
+# ==================== AI 引擎配置 ====================
+
+llm:
+  provider: "openai"                  # LLM提供商: openai | anthropic
+  model: "gpt-4o"                     # 模型名称
+  api_key: ""                         # API Key (建议通过环境变量 ADCAST_LLM_API_KEY 设置)
+  base_url: null                      # 自定义API地址（如使用代理）
+  temperature: 0.3                    # 决策稳定性（越低越稳定）
+  max_tokens: 4096
+
+# ==================== Checkpoint 配置 ====================
+# 用于 LangGraph 状态持久化
+# - memory: 内存存储（开发/测试，重启丢失）
+# - postgres: PostgreSQL存储（生产环境持久化）
+
+checkpoint:
+  backend: "memory"                   # memory | postgres
+  postgres:
+    host: "localhost"
+    port: 5432
+    database: "adcast"
+    user: "adcast"
+    password: ""                      # 建议通过环境变量 ADCAST_PG_PASSWORD 设置
+    table_name: "checkpoints"
+
+# ==================== 闭环Loop配置 ====================
+
+loop:
+  interval_minutes: 60                # 每次循环间隔（分钟）
+  max_iterations: 10                  # 最大迭代次数
+  auto_resume_after_pause: false      # 暂停后是否自动恢复（需人工审批建议false）
+
+# ==================== 安全设置 ====================
+
 security:
   global_budget_limit_daily: 10000.0    # 全局每日预算上限 (USD)
   require_approval_for_create: true     # 创建Campaign需要确认
@@ -15,25 +48,21 @@ security:
   max_retry_attempts: 3
   request_timeout: 30
 
-# 决策引擎设置
-decision_engine:
-  default_strategy: roas_maximize       # 默认策略
-  min_budget_per_platform: 100.0        # 每平台最低预算
+# ==================== 平台配置 ====================
 
-# 平台配置
 platforms:
   # ==================== 海外平台 (Official MCP) ====================
 
   google_ads:
-    enabled: false                      # 启用此平台
+    enabled: false
     mcp_server: "pipx run --spec git+https://github.com/googleads/google-ads-mcp.git google-ads-mcp"
     auth_type: oauth2
     credentials:
-      developer_token: ""               # Google Ads Developer Token
-      client_id: ""                     # OAuth2 Client ID
-      client_secret: ""                 # OAuth2 Client Secret
-      refresh_token: ""                 # OAuth2 Refresh Token
-      login_customer_id: ""             # MCC Account ID (可选)
+      developer_token: ""
+      client_id: ""
+      client_secret: ""
+      refresh_token: ""
+      login_customer_id: ""
     budget_limit_daily: 5000.0
     require_approval: true
     extra:
@@ -44,10 +73,10 @@ platforms:
     mcp_server: "npx -y @pipeboard/mcp-meta-ads"
     auth_type: oauth2
     credentials:
-      access_token: ""                  # Meta Access Token
-      app_id: ""                        # Facebook App ID
-      app_secret: ""                    # Facebook App Secret
-      ad_account_id: ""                 # Ad Account ID
+      access_token: ""
+      app_id: ""
+      app_secret: ""
+      ad_account_id: ""
     budget_limit_daily: 5000.0
     require_approval: true
     extra:
@@ -55,13 +84,13 @@ platforms:
 
   amazon_dsp:
     enabled: false
-    mcp_server: "https://your-amazon-mcp-server.com/mcp"  # 或使用Docker本地部署
+    mcp_server: "https://your-amazon-mcp-server.com/mcp"
     auth_type: oauth2
     credentials:
-      client_id: ""                     # Amazon Client ID
-      client_secret: ""                 # Amazon Client Secret
-      refresh_token: ""                 # Amazon Refresh Token
-      profile_id: ""                    # DSP Profile ID
+      client_id: ""
+      client_secret: ""
+      refresh_token: ""
+      profile_id: ""
     budget_limit_daily: 10000.0
     require_approval: true
 
@@ -70,61 +99,58 @@ platforms:
     mcp_server: "https://your-adform-mcp-server.com/mcp"
     auth_type: oauth2
     credentials:
-      client_id: ""                     # Adform Client ID
-      client_secret: ""                 # Adform Client Secret
-      access_token: ""                  # Access Token
+      client_id: ""
+      client_secret: ""
+      access_token: ""
     budget_limit_daily: 5000.0
     require_approval: true
 
-  # ==================== 国内平台 (Official MCP + Self-built Adapters) ====================
+  # ==================== 国内平台 ====================
 
   oceanengine:
     enabled: false
-    mcp_server: "https://open.oceanengine.com/openapi/mcp"  # 巨量引擎官方MCP
+    mcp_server: "https://open.oceanengine.com/openapi/mcp"
     auth_type: oauth2
     credentials:
-      app_id: ""                        # 应用ID
-      app_secret: ""                    # 应用密钥
-      access_token: ""                  # Access Token
-      refresh_token: ""                 # Refresh Token
-      advertiser_id: ""                 # 广告主ID
-    budget_limit_daily: 20000.0         # CNY
+      app_id: ""
+      app_secret: ""
+      access_token: ""
+      refresh_token: ""
+      advertiser_id: ""
+    budget_limit_daily: 20000.0
     require_approval: true
 
   tencent_ads:
     enabled: false
-    # 腾讯广告无官方MCP，使用自研Adapter
     api_base_url: "https://api.e.qq.com/v3.0"
     auth_type: oauth2
     credentials:
-      account_id: ""                    # 账户ID
-      access_token: ""                  # Access Token
-      client_id: ""                     # 应用ID
-      client_secret: ""                 # 应用密钥
-    budget_limit_daily: 10000.0         # CNY
+      account_id: ""
+      access_token: ""
+      client_id: ""
+      client_secret: ""
+    budget_limit_daily: 10000.0
     require_approval: true
 
   kuaishou:
     enabled: false
-    # 快手无官方MCP，使用自研Adapter
     api_base_url: "https://ad.e.kuaishou.com/rest/openapi/v1"
     auth_type: oauth2
     credentials:
-      advertiser_id: ""                 # 广告主ID
-      access_token: ""                  # Access Token
-      refresh_token: ""                 # Refresh Token
-      app_id: ""                        # 应用ID
-    budget_limit_daily: 10000.0         # CNY
+      advertiser_id: ""
+      access_token: ""
+      refresh_token: ""
+      app_id: ""
+    budget_limit_daily: 10000.0
     require_approval: true
 
   baidu_ads:
     enabled: false
-    # 百度无官方MCP，使用自研Adapter
     api_base_url: "https://api.baidu.com/json/sms/service"
     auth_type: api_key
     credentials:
-      username: ""                      # 用户名
-      password: ""                      # 密码
-      token: ""                         # API Token
-    budget_limit_daily: 5000.0          # CNY
+      username: ""
+      password: ""
+      token: ""
+    budget_limit_daily: 5000.0
     require_approval: true
