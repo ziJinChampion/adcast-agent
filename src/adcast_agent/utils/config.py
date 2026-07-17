@@ -71,6 +71,21 @@ class LoopConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """长期记忆配置"""
+    backend: str = "placeholder"       # placeholder | chroma | milvus
+    embedding_model: str = "text-embedding-3-small"
+    embedding_api_key: str = ""        # 空则回退到 llm.api_key
+    chroma_persist_dir: str = "./data/chroma"
+    chroma_collection: str = "adcast_memory"
+    milvus_host: str = "localhost"
+    milvus_port: int = 19530
+    milvus_user: str = ""
+    milvus_password: str = ""
+    milvus_collection: str = "adcast_memory"
+
+
+@dataclass
 class AgentConfig:
     """Agent全局配置"""
     name: str = "adcast-agent"
@@ -78,6 +93,7 @@ class AgentConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     loop: LoopConfig = field(default_factory=LoopConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     platforms: Dict[str, PlatformConfig] = field(default_factory=dict)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     decision_engine: Dict[str, Any] = field(default_factory=dict)
@@ -155,6 +171,24 @@ class ConfigManager:
                 "max_iterations": 10,
                 "auto_resume_after_pause": False,
             },
+            "long_term_memory": {
+                "backend": "placeholder",
+                "embedding": {
+                    "model": "text-embedding-3-small",
+                    "api_key": "",
+                },
+                "chroma": {
+                    "persist_dir": "./data/chroma",
+                    "collection_name": "adcast_memory",
+                },
+                "milvus": {
+                    "host": "localhost",
+                    "port": 19530,
+                    "user": "",
+                    "password": "",
+                    "collection_name": "adcast_memory",
+                },
+            },
             "platforms": {},
             "security": {
                 "global_budget_limit_daily": 10000.0,
@@ -193,6 +227,10 @@ class ConfigManager:
         # Checkpoint 后端切换
         if cp_backend := os.getenv("ADCAST_CHECKPOINT_BACKEND"):
             config.setdefault("checkpoint", {})["backend"] = cp_backend
+
+        # 长期记忆后端切换
+        if mem_backend := os.getenv("ADCAST_MEMORY_BACKEND"):
+            config.setdefault("long_term_memory", {})["backend"] = mem_backend
 
         # 各平台凭证
         for key, value in os.environ.items():
@@ -240,6 +278,24 @@ class ConfigManager:
             auto_resume_after_pause=loop_raw.get("auto_resume_after_pause", False),
         )
 
+        # 解析Memory配置
+        mem_raw = raw.get("long_term_memory", {})
+        mem_embedding = mem_raw.get("embedding", {})
+        mem_chroma = mem_raw.get("chroma", {})
+        mem_milvus = mem_raw.get("milvus", {})
+        memory_config = MemoryConfig(
+            backend=mem_raw.get("backend", "placeholder"),
+            embedding_model=mem_embedding.get("model", "text-embedding-3-small"),
+            embedding_api_key=mem_embedding.get("api_key", ""),
+            chroma_persist_dir=mem_chroma.get("persist_dir", "./data/chroma"),
+            chroma_collection=mem_chroma.get("collection_name", "adcast_memory"),
+            milvus_host=mem_milvus.get("host", "localhost"),
+            milvus_port=mem_milvus.get("port", 19530),
+            milvus_user=mem_milvus.get("user", ""),
+            milvus_password=mem_milvus.get("password", ""),
+            milvus_collection=mem_milvus.get("collection_name", "adcast_memory"),
+        )
+
         # 解析平台配置
         platforms = {}
         for name, pconf in raw.get("platforms", {}).items():
@@ -253,6 +309,7 @@ class ConfigManager:
             llm=llm_config,
             checkpoint=checkpoint_config,
             loop=loop_config,
+            memory=memory_config,
             platforms=platforms,
             security=security,
             decision_engine=raw.get("decision_engine", {}),
@@ -297,6 +354,30 @@ class ConfigManager:
             "interval_minutes": self._config.loop.interval_minutes,
             "max_iterations": self._config.loop.max_iterations,
             "auto_resume_after_pause": self._config.loop.auto_resume_after_pause,
+        }
+
+    def get_memory_config(self) -> Dict[str, Any]:
+        """获取长期记忆配置为字典（兼容 memory_factory.create_memory 接口）"""
+        mem = self._config.memory
+        llm_cfg = self.get_llm_config()
+        return {
+            "backend": mem.backend,
+            "embedding": {
+                "model": mem.embedding_model,
+                "api_key": mem.embedding_api_key or llm_cfg.get("api_key", ""),
+            },
+            "chroma": {
+                "persist_dir": mem.chroma_persist_dir,
+                "collection_name": mem.chroma_collection,
+            },
+            "milvus": {
+                "host": mem.milvus_host,
+                "port": mem.milvus_port,
+                "user": mem.milvus_user,
+                "password": mem.milvus_password,
+                "collection_name": mem.milvus_collection,
+            },
+            "_llm_config": llm_cfg,  # 用于 fallback
         }
 
 
