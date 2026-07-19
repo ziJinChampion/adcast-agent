@@ -48,6 +48,27 @@ security:
   max_retry_attempts: 3
   request_timeout: 30
 
+# ==================== 长期记忆配置 ====================
+# 用于跨 Campaign 经验复用和 LLM RAG 增强
+# - placeholder: 内存字典（开发测试，重启丢失）
+# - chroma: ChromaDB 本地向量数据库（推荐开发环境）
+# - milvus: Milvus 分布式向量数据库（生产环境）
+
+long_term_memory:
+  backend: "chroma"                   # placeholder | chroma | milvus
+  embedding:
+    model: "text-embedding-3-small"   # OpenAI embedding 模型
+    api_key: ""                       # 空则自动回退到 llm.api_key
+  chroma:
+    persist_dir: "./data/chroma"      # 数据持久化目录
+    collection_name: "adcast_memory"  # 集合名称
+  milvus:
+    host: "localhost"
+    port: 19530
+    user: ""
+    password: ""
+    collection_name: "adcast_memory"
+
 # ==================== 平台配置 ====================
 
 platforms:
